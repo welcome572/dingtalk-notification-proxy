@@ -1,0 +1,16 @@
+app:
+  name: "dingtalk-notification-proxy"
+  version: "1.0.0"
+
+dingtalk:
+  webhooks:
+    default:
+      url: "https://oapi.dingtalk.com/robot/send?access_token=a64f9259e9ad974688b199f25d1e0bf57874ce726c13adc713095095530b3405"
+      secret: "SEC5cd5c448a4268572634004120f9668d2192877d3f2c3824ef71de54eff1cd9f3"
+
+security:
+  rate_limit:
+    enabled: true
+
+logging:
+  level: "INFO"

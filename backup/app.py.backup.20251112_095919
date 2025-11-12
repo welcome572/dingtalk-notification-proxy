@@ -1,0 +1,276 @@
+from fastapi import FastAPI, HTTPException
+import logging
+import requests
+import json
+import hmac
+import hashlib
+import base64
+import time
+import urllib.parse
+from datetime import datetime
+import yaml
+import os
+
+# 设置日志
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+# 加载配置
+def load_config():
+    try:
+        config_path = os.path.join('config', 'config.yaml')
+        with open(config_path, 'r', encoding='utf-8') as f:
+            return yaml.safe_load(f)
+    except Exception as e:
+        logger.error(f"加载配置文件失败: {e}")
+        return {}
+
+config = load_config()
+dingtalk_config = config.get('dingtalk', {}).get('webhooks', {}).get('default', {})
+
+app = FastAPI(
+    title="DingTalk通知中转服务",
+    description="全类型通知中转服务",
+    version="7.2.0"
+)
+
+class DingTalkSender:
+    @staticmethod
+    def generate_signature(secret: str) -> dict:
+        timestamp = str(round(time.time() * 1000))
+        secret_enc = secret.encode('utf-8')
+        string_to_sign = f'{timestamp}\n{secret}'
+        string_to_sign_enc = string_to_sign.encode('utf-8')
+        hmac_code = hmac.new(secret_enc, string_to_sign_enc, digestmod=hashlib.sha256).digest()
+        sign = urllib.parse.quote_plus(base64.b64encode(hmac_code))
+        return {"timestamp": timestamp, "sign": sign}
+
+    @staticmethod
+    def send_to_dingtalk(webhook_url: str, secret: str, message: dict) -> dict:
+        try:
+            signature = DingTalkSender.generate_signature(secret)
+            full_url = f"{webhook_url}&timestamp={signature['timestamp']}&sign={signature['sign']}"
+            
+            headers = {'Content-Type': 'application/json'}
+            logger.info(f"发送钉钉消息: {json.dumps(message, ensure_ascii=False)}")
+            response = requests.post(full_url, data=json.dumps(message, ensure_ascii=False), headers=headers, timeout=10)
+            response.raise_for_status()
+            
+            result = response.json()
+            
+            if result.get('errcode') == 0:
+                logger.info("钉钉消息发送成功")
+                return {"success": True, "message_id": result.get('msgid')}
+            else:
+                logger.error(f"钉钉API错误: {result.get('errmsg')}")
+                return {"success": False, "error": result.get('errmsg')}
+                
+        except Exception as e:
+            logger.error(f"发送钉钉消息失败: {str(e)}")
+            return {"success": False, "error": str(e)}
+
+def detect_project_type(data: dict) -> str:
+    """检测项目类型并返回项目名称"""
+    # 将数据转换为字符串进行检测
+    data_str = json.dumps(data, ensure_ascii=False).lower()
+    
+    # Emby项目检测 - 精确检测Emby特有字段
+    if 'Event' in data and 'Item' in data and 'Session' in data:
+        return 'Emby'
+    
+    # CAS项目检测 (cloud189-auto-save) - 扩展关键词，包括emby入库相关
+    cas_keywords = [
+        'strm', 'strm文件', '生成strm', '文件完成',
+        '总文件数', '成功数', '失败数', '跳过数',
+        'cloud189', '天翼云盘', 'auto-save', '追更',
+        'emby入库', 'emby', '入库', '抓娃娃', '姐姐妹妹',
+        '冷宫', 'maternity', 'matron', '生成', '完成'
+    ]
+    
+    # 检查数据中是否包含CAS关键词
+    for keyword in cas_keywords:
+        if keyword in data_str:
+            return 'CAS'
+    
+    # 监控项目检测
+    if any(keyword in data_str for keyword in ['prometheus', 'alertmanager', 'zabbix', '监控', '告警']):
+        return '监控'
+    
+    # Git项目检测
+    if any(keyword in data_str for keyword in ['git', 'repository', 'commit', 'push', 'pull']):
+        return 'Git'
+    
+    # Docker项目检测
+    if any(keyword in data_str for keyword in ['docker', 'container', 'kubernetes']):
+        return 'Docker'
+    
+    # 备份项目检测
+    if any(keyword in data_str for keyword in ['backup', '备份', 'restic', 'borg']):
+        return '备份'
+    
+    # 如果无法识别具体项目，返回"系统"
+    return '系统'
+
+def parse_emby_notification(data: dict) -> str:
+    """专门解析Emby通知，返回中文格式的消息内容"""
+    event = data.get('Event', '')
+    user = data.get('User', {}).get('Name', '未知用户')
+    item_name = data.get('Item', {}).get('Name', '')
+    series_name = data.get('Item', {}).get('SeriesName', '')
+    device = data.get('Session', {}).get('DeviceName', '未知设备')
+    client = data.get('Session', {}).get('Client', '未知客户端')
+    
+    # 事件类型映射为中文 - 已优化"继续播放"为中文
+    event_translations = {
+        'playback.start': '开始播放',
+        'playback.stop': '停止播放', 
+        'playback.pause': '暂停播放',
+        'playback.resume': '继续播放',
+        'user.authenticated': '用户登录',
+        'user.locked.out': '用户锁定',
+        'session.start': '会话开始',
+        'session.end': '会话结束',
+        'system.notification': '系统通知'
+    }
+    
+    event_cn = event_translations.get(event, event)
+    
+    # 构建中文内容
+    content_parts = []
+    
+    if user and user != '未知用户':
+        content_parts.append(f"**👤 用户:** {user}")
+    
+    if item_name:
+        if series_name:
+            content_parts.append(f"**📺 剧集:** {series_name} - {item_name}")
+        else:
+            content_parts.append(f"**📄 内容:** {item_name}")
+    
+    if device and device != '未知设备':
+        content_parts.append(f"**💻 设备:** {device} ({client})")
+    
+    content_parts.append(f"**🎯 事件:** {event_cn}")
+    
+    return "\n".join(content_parts)
+
+def parse_notification(data: dict) -> dict:
+    """统一解析通知"""
+    # 检测项目类型
+    project_type = detect_project_type(data)
+    logger.info(f"检测到项目类型: {project_type}")
+    
+    # 如果是Emby项目，使用专门的解析器
+    if project_type == 'Emby':
+        message = parse_emby_notification(data)
+    else:
+        # 其他项目的消息内容提取
+        message = data.get('message', data.get('content', data.get('text', data.get('body', ''))))
+        
+        # 如果消息是字典，转换为格式化的字符串
+        if isinstance(message, dict):
+            message_parts = []
+            for key, value in message.items():
+                if isinstance(value, (str, int, float, bool)):
+                    message_parts.append(f"**{key}:** {value}")
+            message = "\n".join(message_parts) if message_parts else ""
+        
+        # 如果没有消息内容，使用数据中的其他信息
+        if not message:
+            message_parts = []
+            for key, value in data.items():
+                if key not in ['title', 'Title', 'subject'] and isinstance(value, (str, int, float, bool)):
+                    message_parts.append(f"**{key}:** {value}")
+            message = "\n".join(message_parts) if message_parts else "收到新的通知"
+    
+    # 根据项目类型设置图标
+    icon_configs = {
+        'Emby': '🎬',
+        'CAS': '📥', 
+        '监控': '⚠️',
+        'Git': '🔗',
+        'Docker': '🐳',
+        '备份': '💾',
+        '系统': '📢'
+    }
+    icon = icon_configs.get(project_type, '📢')
+    
+    # 状态检测
+    message_str = str(message).lower()
+    if any(word in message_str for word in ['失败', '错误', 'error']):
+        icon = '❌'
+    elif any(word in message_str for word in ['完成', '成功', 'success']):
+        icon = '✅'
+    elif any(word in message_str for word in ['警告', 'warning']):
+        icon = '⚠️'
+    
+    return {
+        "msgtype": "markdown",
+        "markdown": {
+            "title": f"{icon} {project_type}通知",
+            "text": f"""## {icon} {project_type}通知
+
+{message}
+
+**⏰ 时间:** {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"""
+        }
+    }
+
+@app.get("/")
+async def root():
+    return {"message": "全类型通知中转服务", "version": "7.2.0"}
+
+@app.get("/health")
+async def health():
+    return {"status": "healthy", "service": "dingtalk-notification-proxy"}
+
+@app.post("/api/v1/webhook/dingtalk")
+async def dingtalk_webhook_v1(data: dict):
+    return await process_webhook(data)
+
+@app.post("/webhook")
+async def webhook_compatible(data: dict):
+    return await process_webhook(data)
+
+@app.post("/dingtalk")
+async def dingtalk_compatible(data: dict):
+    return await process_webhook(data)
+
+@app.post("/{path:path}")
+async def catch_all_webhook(path: str, data: dict):
+    logger.info(f"收到路径 /{path} 的webhook请求")
+    return await process_webhook(data)
+
+async def process_webhook(data: dict):
+    try:
+        logger.info(f"收到原始数据: {json.dumps(data, ensure_ascii=False)}")
+        
+        if not dingtalk_config.get('url') or not dingtalk_config.get('secret'):
+            raise HTTPException(status_code=500, detail="钉钉配置不完整")
+        
+        # 直接解析通知
+        dingtalk_message = parse_notification(data)
+        
+        logger.info(f"准备发送的钉钉消息: {json.dumps(dingtalk_message, ensure_ascii=False)})")
+        
+        result = DingTalkSender.send_to_dingtalk(
+            dingtalk_config["url"],
+            dingtalk_config["secret"],
+            dingtalk_message
+        )
+        
+        if result["success"]:
+            return {
+                "success": True,
+                "message": "通知已发送到钉钉"
+            }
+        else:
+            raise HTTPException(status_code=500, detail=f"钉钉发送失败: {result.get('error')}")
+            
+    except Exception as e:
+        logger.error(f"处理webhook失败: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"处理失败: {str(e)}")
+
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=8000)
