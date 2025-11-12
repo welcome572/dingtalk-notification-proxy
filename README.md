@@ -31,8 +31,9 @@ docker run -d \
    --name dingtalk-now \
    -p 8000:8000 \
    -v $(pwd):/app \
-   -w /app \
-   -e HTTP_PROXY="" \   #代理地址
-   -e HTTPS_PROXY="" \  #代理地址
+   -w /app \  
+   -e TZ=Asia/Shanghai
+   -e HTTP_PROXY="" \   #代理地址 
+   -e HTTPS_PROXY="" \  #代理地址 
    python:3.9-alpine \
    sh -c "pip install fastapi uvicorn pyyaml requests && uvicorn src.app:app --host 0.0.0.0 --port 8000"
