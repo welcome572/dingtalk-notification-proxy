@@ -1,7 +1,6 @@
-# DingTalk 通知中转服务
-
+git add README.md# DingTalk 通知中转服务 git commit -m "docs: update README" 
 一个全类型通知中转到钉钉的 Docker 服务。
-
+git push
 ## 功能特性
 
 - ✅ 支持多种通知格式（JSON、原始文本）
