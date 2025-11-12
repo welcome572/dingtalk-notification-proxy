@@ -1,3 +1,4 @@
+cat > src/app.py << 'EOF'
 from fastapi import FastAPI, HTTPException
 import logging
 import requests
@@ -37,7 +38,7 @@ dingtalk_config = config.get('dingtalk', {}).get('webhooks', {}).get('default', 
 app = FastAPI(
     title="DingTalk通知中转服务",
     description="全类型通知中转服务",
-    version="7.9.2"
+    version="7.9.6"
 )
 
 # 消息队列和重试机制
@@ -203,6 +204,42 @@ class DingTalkSender:
         except Exception as e:
             logger.error(f"发送钉钉消息失败: {str(e)}")
             return {"success": False, "error": str(e)}
+
+def parse_utc_time(utc_time_str: str) -> str:
+    """将UTC时间字符串转换为本地时间字符串 - 使用简单可靠的方法"""
+    try:
+        logger.info(f"开始转换UTC时间: {utc_time_str}")
+        
+        # 处理Emby的UTC时间格式 (2025-11-12T14:08:45.9182263Z)
+        if utc_time_str.endswith('Z'):
+            # 去掉微秒部分，保留到秒
+            if '.' in utc_time_str:
+                utc_time_str = utc_time_str.split('.')[0] + 'Z'
+            
+        # 使用简单可靠的方法：手动解析并添加8小时（北京时间）
+        if utc_time_str.endswith('Z'):
+            # 提取时间部分
+            time_part = utc_time_str.replace('Z', '')
+            # 解析为datetime对象（无时区信息）
+            utc_time = datetime.strptime(time_part, '%Y-%m-%dT%H:%M:%S')
+            # 手动添加8小时（UTC+8）
+            local_time = utc_time + timedelta(hours=8)
+        else:
+            # 如果不是Z结尾，尝试其他方法
+            utc_time = datetime.fromisoformat(utc_time_str.replace('Z', '+00:00'))
+            local_time = utc_time.astimezone()
+        
+        # 格式化为中文友好的时间格式
+        result = local_time.strftime('%Y-%m-%d %H:%M:%S')
+        logger.info(f"时间转换结果: UTC {utc_time_str} -> 本地 {result}")
+        return result
+        
+    except Exception as e:
+        logger.error(f"时间转换失败: {utc_time_str}, 错误: {e}")
+        # 如果转换失败，返回当前时间
+        current_time = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        logger.info(f"使用当前时间作为后备: {current_time}")
+        return current_time
 
 def detect_project_type(data: dict) -> str:
     """检测项目类型并返回项目名称"""
@@ -452,7 +489,10 @@ def parse_emby_notification(data: dict) -> str:
             if series_name:
                 content_parts.append(f"**📺 剧集:** {series_name}")
                 if season_name:
-                    content_parts.append(f"**📁 季度:** {season_name}")
+                    # 优化季数显示
+                    season_cn = season_name.replace('Season', '第').replace('季', '') + '季'
+                    season_cn = re.sub(r'第\s*(\d+)\s*季', r'第\1季', season_cn)
+                    content_parts.append(f"**📁 季度:** {season_cn}")
                 content_parts.append(f"**🎞️ 集数:** {item_name}")
             else:
                 if production_year:
@@ -479,7 +519,10 @@ def parse_emby_notification(data: dict) -> str:
             if series_name:
                 content_parts.append(f"**📺 剧集:** {series_name}")
             if season_name:
-                content_parts.append(f"**📁 季度:** {season_name}")
+                # 优化季数显示
+                season_cn = season_name.replace('Season', '第').replace('季', '') + '季'
+                season_cn = re.sub(r'第\s*(\d+)\s*季', r'第\1季', season_cn)
+                content_parts.append(f"**📁 季度:** {season_cn}")
             if item_name:
                 content_parts.append(f"**🎞️ 集数:** {item_name}")
                 
@@ -495,7 +538,10 @@ def parse_emby_notification(data: dict) -> str:
             if series_name:
                 content_parts.append(f"**📺 剧集:** {series_name}")
             if item_name:
-                content_parts.append(f"**📁 季度:** {item_name}")
+                # 优化季数显示
+                season_cn = item_name.replace('Season', '第').replace('季', '') + '季'
+                season_cn = re.sub(r'第\s*(\d+)\s*季', r'第\1季', season_cn)
+                content_parts.append(f"**📁 季度:** {season_cn}")
         
         # 添加媒体类型
         type_translations = {
@@ -700,8 +746,14 @@ def parse_notification(data: dict) -> dict:
     # 修复：确保所有项目类型都有正确的标题格式
     title = f"{icon} {project_type}通知"
     
-    # 优化时间显示
-    current_time = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    # 优化时间显示 - 使用事件发生时间而不是当前时间
+    event_time = data.get('Date', '')
+    if event_time:
+        display_time = parse_utc_time(event_time)
+        logger.info(f"使用事件时间: {event_time} -> {display_time}")
+    else:
+        display_time = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        logger.info(f"使用当前时间: {display_time}")
     
     return {
         "msgtype": "markdown",
@@ -711,7 +763,7 @@ def parse_notification(data: dict) -> dict:
 
 {message}
 
-**⏰ 时间:** {current_time}"""
+**⏰ 时间:** {display_time}"""
         }
     }
 
@@ -776,7 +828,7 @@ def generate_message_key(data: dict) -> str:
 
 @app.get("/")
 async def root():
-    return {"message": "全类型通知中转服务", "version": "7.9.2"}
+    return {"message": "全类型通知中转服务", "version": "7.9.6"}
 
 @app.get("/health")
 async def health():
