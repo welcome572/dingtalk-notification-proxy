@@ -37,7 +37,7 @@ dingtalk_config = config.get('dingtalk', {}).get('webhooks', {}).get('default', 
 app = FastAPI(
     title="DingTalk通知中转服务",
     description="全类型通知中转服务",
-    version="7.9.0"
+    version="7.9.2"
 )
 
 # 消息队列和重试机制
@@ -206,17 +206,77 @@ class DingTalkSender:
 
 def detect_project_type(data: dict) -> str:
     """检测项目类型并返回项目名称"""
-    # 优先检测Emby项目 - 精确检测Emby特有字段结构
-    if 'Event' in data and 'Item' in data and 'Server' in data:
-        # 检查是否是Emby的特定事件结构
-        event = data.get('Event', '')
-        item = data.get('Item', {})
-        server = data.get('Server', {})
+    # Emby特有的事件类型全集
+    emby_events = [
+        # 播放控制事件
+        'playback.start', 'playback.stop', 'playback.pause', 'playback.unpause',
+        'playback.resume', 'playback.progress',
         
-        # Emby的典型字段结构
-        if (isinstance(item, dict) and 'Id' in item and 'Type' in item and 
-            isinstance(server, dict) and 'Name' in server and 'Id' in server):
-            return 'Emby'
+        # 用户事件
+        'user.authenticated', 'user.locked.out', 'user.created', 'user.deleted',
+        'user.updated', 'user.password.changed', 'user.policy.updated',
+        
+        # 会话事件
+        'session.start', 'session.end',
+        
+        # 系统事件
+        'system.notification', 'system.task.completed', 'system.webhook.test',
+        'system.webhook.failed', 'system.plugin.installed', 'system.plugin.uninstalled',
+        'system.plugin.updated', 'system.restart', 'system.shutdown',
+        
+        # 媒体库事件
+        'library.new', 'library.add', 'library.update', 'library.delete',
+        'item.added', 'item.updated', 'item.removed', 'item.rate',
+        
+        # 认证事件
+        'authentication.succeeded', 'authentication.failed', 'authentication.revoked',
+        
+        # 设备事件
+        'device.offline', 'device.online', 'device.access',
+        
+        # 转码事件
+        'transcode.start', 'transcode.stop', 'transcode.failed',
+        
+        # 订阅事件
+        'subscription.added', 'subscription.removed', 'subscription.updated',
+        
+        # 同步事件
+        'sync.job.created', 'sync.job.updated', 'sync.job.deleted',
+        
+        # 活动日志事件
+        'activitylog.entry.created'
+    ]
+    
+    event = data.get('Event', '')
+    user = data.get('User', {})
+    server = data.get('Server', {})
+    session = data.get('Session', {})
+    item = data.get('Item', {})
+    
+    # 方法1: 检查事件类型是否为Emby特有事件
+    if event in emby_events:
+        return 'Emby'
+    
+    # 方法2: 检查Emby特有的字段结构组合
+    if (isinstance(server, dict) and server.get('Name') and 
+        isinstance(server, dict) and server.get('Id') and
+        'Version' in server):
+        return 'Emby'
+    
+    # 方法3: 检查Session结构（Emby特有）
+    if (isinstance(session, dict) and 
+        any(key in session for key in ['Client', 'DeviceName', 'DeviceId', 'RemoteEndPoint'])):
+        return 'Emby'
+    
+    # 方法4: 检查Item结构（Emby媒体项目）
+    if (isinstance(item, dict) and 
+        any(key in item for key in ['Id', 'Type', 'Name', 'ServerId', 'MediaType'])):
+        return 'Emby'
+    
+    # 方法5: 检查User结构（Emby用户）
+    if (isinstance(user, dict) and 
+        any(key in user for key in ['Name', 'Id', 'ServerId', 'HasPassword', 'LastLoginDate'])):
+        return 'Emby'
     
     # 将数据转换为字符串进行其他项目检测
     data_str = json.dumps(data, ensure_ascii=False).lower()
@@ -267,21 +327,80 @@ def parse_emby_notification(data: dict) -> str:
     production_year = item.get('ProductionYear', '')
     device = data.get('Session', {}).get('DeviceName', '未知设备')
     client = data.get('Session', {}).get('Client', '未知客户端')
+    server_name = data.get('Server', {}).get('Name', '未知服务器')
+    remote_ip = data.get('Session', {}).get('RemoteEndPoint', '未知IP')
     
-    # 事件类型映射为中文
+    # Emby事件类型完整映射为中文
     event_translations = {
+        # 播放控制
         'playback.start': '开始播放',
         'playback.stop': '停止播放', 
         'playback.pause': '暂停播放',
         'playback.unpause': '继续播放',
         'playback.resume': '继续播放',
+        'playback.progress': '播放进度',
+        
+        # 用户相关
         'user.authenticated': '用户登录',
         'user.locked.out': '用户锁定',
+        'user.created': '用户创建',
+        'user.deleted': '用户删除',
+        'user.updated': '用户更新',
+        'user.password.changed': '密码修改',
+        'user.policy.updated': '策略更新',
+        
+        # 会话
         'session.start': '会话开始',
         'session.end': '会话结束',
+        
+        # 系统
         'system.notification': '系统通知',
+        'system.task.completed': '任务完成',
+        'system.webhook.test': 'Webhook测试',
+        'system.webhook.failed': 'Webhook失败',
+        'system.plugin.installed': '插件安装',
+        'system.plugin.uninstalled': '插件卸载',
+        'system.plugin.updated': '插件更新',
+        'system.restart': '系统重启',
+        'system.shutdown': '系统关闭',
+        
+        # 媒体库
         'library.new': '新增媒体',
-        'item.added': '项目添加'
+        'library.add': '媒体添加',
+        'library.update': '媒体更新',
+        'library.delete': '媒体删除',
+        'item.added': '项目添加',
+        'item.updated': '项目更新',
+        'item.removed': '项目移除',
+        'item.rate': '项目评分',
+        
+        # 认证
+        'authentication.succeeded': '认证成功',
+        'authentication.failed': '认证失败',
+        'authentication.revoked': '认证撤销',
+        
+        # 设备
+        'device.offline': '设备离线',
+        'device.online': '设备上线',
+        'device.access': '设备访问',
+        
+        # 转码
+        'transcode.start': '转码开始',
+        'transcode.stop': '转码停止',
+        'transcode.failed': '转码失败',
+        
+        # 订阅
+        'subscription.added': '订阅添加',
+        'subscription.removed': '订阅移除',
+        'subscription.updated': '订阅更新',
+        
+        # 同步
+        'sync.job.created': '同步任务创建',
+        'sync.job.updated': '同步任务更新',
+        'sync.job.deleted': '同步任务删除',
+        
+        # 活动日志
+        'activitylog.entry.created': '活动日志创建'
     }
     
     event_cn = event_translations.get(event, event)
@@ -289,9 +408,64 @@ def parse_emby_notification(data: dict) -> str:
     # 构建中文内容
     content_parts = []
     
-    # 处理新增入库事件
-    if event in ['library.new', 'item.added']:
-        content_parts.append(f"**🎉 新增内容入库**")
+    # 用户认证和登录事件 - 专门处理
+    if event in ['user.authenticated', 'authentication.succeeded', 'authentication.failed']:
+        content_parts.append("**🔐 用户登录通知**")
+        content_parts.append(f"**👤 用户:** {user}")
+        content_parts.append(f"**🖥️ 服务器:** {server_name}")
+        
+        # 处理设备信息
+        if device and device != '未知设备':
+            content_parts.append(f"**💻 设备:** {device}")
+        
+        # 处理客户端信息
+        if client and client != '未知客户端':
+            # 客户端名称美化
+            client_names = {
+                'Emby Web': '网页端',
+                'Emby Theater': '影院端', 
+                'Emby for Android': '安卓端',
+                'Emby for iOS': 'iOS端',
+                'Emby for Windows': 'Windows端',
+                'Emby for Mac': 'Mac端'
+            }
+            client_cn = client_names.get(client, client)
+            content_parts.append(f"**📱 客户端:** {client_cn}")
+        
+        # 处理IP地址
+        if remote_ip and remote_ip != '未知IP':
+            content_parts.append(f"**🌐 IP地址:** {remote_ip}")
+        
+        # 状态信息
+        if event == 'authentication.failed':
+            content_parts.append("**❌ 状态:** 认证失败")
+        else:
+            content_parts.append("**✅ 状态:** 登录成功")
+    
+    # 播放相关事件
+    elif event.startswith('playback.'):
+        content_parts.append("**🎬 播放事件**")
+        if user and user != '未知用户':
+            content_parts.append(f"**👤 用户:** {user}")
+        
+        if item_name:
+            if series_name:
+                content_parts.append(f"**📺 剧集:** {series_name}")
+                if season_name:
+                    content_parts.append(f"**📁 季度:** {season_name}")
+                content_parts.append(f"**🎞️ 集数:** {item_name}")
+            else:
+                if production_year:
+                    content_parts.append(f"**🎬 电影:** {item_name} ({production_year})")
+                else:
+                    content_parts.append(f"**🎬 内容:** {item_name}")
+        
+        if device and device != '未知设备':
+            content_parts.append(f"**💻 设备:** {device} ({client})")
+    
+    # 媒体库新增事件
+    elif event in ['library.new', 'item.added', 'library.add']:
+        content_parts.append("**🎉 新增内容入库**")
         
         if item_type == 'Movie':
             # 电影类型
@@ -330,24 +504,40 @@ def parse_emby_notification(data: dict) -> str:
             'Series': '剧集系列', 
             'Season': '季度',
             'Audio': '音乐',
-            'Book': '书籍'
+            'Book': '书籍',
+            'BoxSet': '合集',
+            'MusicAlbum': '音乐专辑',
+            'MusicArtist': '音乐艺术家'
         }
         type_cn = type_translations.get(item_type, item_type)
         content_parts.append(f"**📄 类型:** {type_cn}")
-        
-    else:
-        # 播放相关事件
+    
+    # 系统事件
+    elif event.startswith('system.'):
+        content_parts.append("**⚙️ 系统事件**")
+        content_parts.append(f"**🖥️ 服务器:** {server_name}")
+        description = data.get('Description', '')
+        if description:
+            content_parts.append(f"**📝 详情:** {description}")
+    
+    # 设备事件
+    elif event.startswith('device.'):
+        content_parts.append("**📱 设备事件**")
         if user and user != '未知用户':
             content_parts.append(f"**👤 用户:** {user}")
-        
+        content_parts.append(f"**💻 设备:** {device}")
+        content_parts.append(f"**📱 客户端:** {client}")
+    
+    # 默认事件处理
+    else:
+        content_parts.append("**📢 Emby事件**")
+        if user and user != '未知用户':
+            content_parts.append(f"**👤 用户:** {user}")
         if item_name:
-            if series_name:
-                content_parts.append(f"**📺 剧集:** {series_name} - {item_name}")
-            else:
-                content_parts.append(f"**📄 内容:** {item_name}")
-        
+            content_parts.append(f"**📄 内容:** {item_name}")
         if device and device != '未知设备':
-            content_parts.append(f"**💻 设备:** {device} ({client})")
+            content_parts.append(f"**💻 设备:** {device}")
+        content_parts.append(f"**🖥️ 服务器:** {server_name}")
     
     content_parts.append(f"**🎯 事件:** {event_cn}")
     
@@ -456,25 +646,41 @@ def parse_notification(data: dict) -> dict:
     # 根据项目类型和状态设置图标
     message_str = str(message).lower()
     
-    # CAS项目特殊图标处理
-    if project_type == 'CAS':
-        if any(word in message_str for word in ['失败', '错误', 'error']):
+    # Emby项目特殊图标处理
+    if project_type == 'Emby':
+        if '用户登录' in message or 'user.authenticated' in str(data.get('Event', '')):
+            icon = '🔐'
+        elif '开始播放' in message or 'playback.start' in str(data.get('Event', '')):
+            icon = '🎬'
+        elif '新增媒体' in message or 'item.added' in str(data.get('Event', '')):
+            icon = '🎉'
+        elif any(word in message_str for word in ['失败', '错误', 'error']):
             icon = '❌'
-        elif any(word in message_str for word in ['重命名完成', '自动重命名']):
-            icon = '🔄'  # 重命名使用循环箭头
-        elif any(word in message_str for word in ['入库成功', '完成', '成功', 'success']):
+        elif any(word in message_str for word in ['完成', '成功', 'success']):
             icon = '✅'
-        elif any(word in message_str for word in ['生成strm', 'strm文件']):
-            icon = '📄'  # 文件生成使用文档图标
         elif any(word in message_str for word in ['警告', 'warning']):
             icon = '⚠️'
         else:
-            icon = '📥'  # 默认CAS图标
+            icon = '🎬'
+    
+    # CAS项目特殊图标处理
+    elif project_type == 'CAS':
+        if any(word in message_str for word in ['失败', '错误', 'error']):
+            icon = '❌'
+        elif any(word in message_str for word in ['重命名完成', '自动重命名']):
+            icon = '🔄'
+        elif any(word in message_str for word in ['入库成功', '完成', '成功', 'success']):
+            icon = '✅'
+        elif any(word in message_str for word in ['生成strm', 'strm文件']):
+            icon = '📄'
+        elif any(word in message_str for word in ['警告', 'warning']):
+            icon = '⚠️'
+        else:
+            icon = '📥'
     
     # 其他项目图标处理
     else:
         icon_configs = {
-            'Emby': '🎬',
             '监控': '⚠️',
             'Git': '🔗',
             'Docker': '🐳',
@@ -494,6 +700,9 @@ def parse_notification(data: dict) -> dict:
     # 修复：确保所有项目类型都有正确的标题格式
     title = f"{icon} {project_type}通知"
     
+    # 优化时间显示
+    current_time = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    
     return {
         "msgtype": "markdown",
         "markdown": {
@@ -502,7 +711,7 @@ def parse_notification(data: dict) -> dict:
 
 {message}
 
-**⏰ 时间:** {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"""
+**⏰ 时间:** {current_time}"""
         }
     }
 
@@ -550,9 +759,13 @@ def generate_message_key(data: dict) -> str:
         user = data.get('User', {}).get('Name', '')
         item_name = data.get('Item', {}).get('Name', '')
         item_type = data.get('Item', {}).get('Type', '')
+        server_name = data.get('Server', {}).get('Name', '')
         
+        # 对于用户登录事件
+        if event in ['user.authenticated', 'authentication.succeeded', 'authentication.failed']:
+            return f"Emby_Auth_{user}_{server_name}"
         # 对于新增入库事件，使用更具体的键
-        if event in ['library.new', 'item.added']:
+        elif event in ['library.new', 'item.added']:
             return f"Emby_Add_{item_type}_{item_name}"
         else:
             return f"Emby_{event}_{user}_{item_name}"
@@ -563,7 +776,7 @@ def generate_message_key(data: dict) -> str:
 
 @app.get("/")
 async def root():
-    return {"message": "全类型通知中转服务", "version": "7.9.0"}
+    return {"message": "全类型通知中转服务", "version": "7.9.2"}
 
 @app.get("/health")
 async def health():
@@ -635,3 +848,4 @@ async def process_webhook(data: dict):
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8000)
+EOF
