@@ -1,4 +1,3 @@
-cat > src/app.py << 'EOF'
 from fastapi import FastAPI, HTTPException
 import logging
 import requests
