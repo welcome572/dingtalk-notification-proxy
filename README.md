@@ -32,7 +32,7 @@ docker run -d \
    -p 8000:8000 \
    -v $(pwd):/app \
    -w /app \
-   -e HTTP_PROXY="http://admin:wang105220@192.168.1.102:7890" \
-   -e HTTPS_PROXY="http://admin:wang105220@192.168.1.102:7890" \
+   -e HTTP_PROXY="" \
+   -e HTTPS_PROXY="" \
    python:3.9-alpine \
    sh -c "pip install fastapi uvicorn pyyaml requests && uvicorn src.app:app --host 0.0.0.0 --port 8000"
